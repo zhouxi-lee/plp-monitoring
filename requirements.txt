@@ -1,0 +1,6 @@
+streamlit
+playwright
+pandas
+pyyaml
+rapidfuzz
+pillow

@@ -1,0 +1,54 @@
+# === 기본 동작 옵션 ===
+defaults:
+  wait_until: "networkidle"
+  viewport: { width: 1440, height: 900 }
+  shots: true
+  max_cards: 120
+  locale: "en-GB"
+  scroll:
+    step_px: 1400
+    max_steps: 20
+    settle_ms: 1200
+
+# === 비교할 두 페이지를 등록하세요 ===
+pages:
+  - name: "ASIS"
+    url: "https://example.com/plp-asis"   # ← AS-IS PLP URL 로 교체
+    accept_cookie_selector: "button[aria-label*='Accept'], #truste-consent-button, .accept-cookie"
+    selectors:
+      card: ".product-card, article.product, li.product"
+      title: ".product-title, .title, h3 a"
+      price: ".price, .product-price, [data-testid*='price']"
+      discount: ".discount, .saving, .badge--saving, .pct-off"
+      members: ".members, .member-price, .price--members"
+      installment: ".installment, .credit, .financing"
+      rating: ".rating, [aria-label*='rating']"
+      review_count: ".review-count, .reviews-count"
+      badges: ".badge, .promo-label, .flag"
+      shipping: ".shipping, .delivery"
+      cta: ".btn-buy, .cta, button[aria-label*='buy'], .buy-now"
+      image: "img, picture img"
+
+  - name: "TOBE"
+    url: "https://example.com/plp-tobe"   # ← TO-BE PLP URL 로 교체
+    accept_cookie_selector: "button[aria-label*='Accept'], #truste-consent-button, .accept-cookie"
+    selectors:
+      card: ".product-card, article.product, li.product"
+      title: ".product-title, .title, h3 a"
+      price: ".price, .product-price, [data-testid*='price']"
+      discount: ".discount, .saving, .badge--saving, .pct-off"
+      members: ".members, .member-price, .price--members"
+      installment: ".installment, .credit, .financing"
+      rating: ".rating, [aria-label*='rating']"
+      review_count: ".review-count, .reviews-count"
+      badges: ".badge, .promo-label, .flag"
+      shipping: ".shipping, .delivery"
+      cta: ".btn-buy, .cta, button[aria-label*='buy'], .buy-now"
+      image: "img, picture img"
+
+# === 모델코드 추출 패턴 (필요시 추가) ===
+model_patterns:
+  - "OLED\d{2,3}[A-Z0-9]+(?:[.-][A-Z0-9]+)?"
+  - "QNED\d{2,3}[A-Z0-9]+(?:[.-][A-Z0-9]+)?"
+  - "NANO\d{2,3}[A-Z0-9]+(?:[.-][A-Z0-9]+)?"
+  - "\b[A-Z]{2,}\d{2,}"
