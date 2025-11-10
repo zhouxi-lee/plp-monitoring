@@ -1,3 +1,29 @@
+# ---- Playwright 브라우저 자동 설치 가드 (최상단에 추가) ----
+import os, subprocess, sys
+
+def ensure_playwright_chromium():
+    try:
+        # 캐시 경로 힌트(권장): 환경에 따라 생략 가능
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.path.expanduser("~/.cache/ms-playwright"))
+        # 설치 여부 테스트: 버전 조회 시도
+        from playwright.sync_api import sync_playwright  # noqa
+        # 간단한 런치 테스트까지 시도하면 더 확실
+        with sync_playwright() as p:
+            p.chromium.launch()  # 실패하면 except로 진입
+        return
+    except Exception:
+        pass
+    # 설치 수행
+    try:
+        # --with-deps 는 Streamlit Cloud에선 불필요(apt로 미리 설치). 실패하면 옵션 없이 재시도.
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    except Exception:
+        subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
+
+ensure_playwright_chromium()
+# ---- /자동 설치 가드 끝 ----
+
+
 # app.py — Streamlit + Playwright (UK ↔ SG)
 # Network-first + DOM fallback + deep JSON (__NEXT_DATA__/window)
 # GraphQL POST sniffing + text/plain JSON 파싱 + PDP 폴백
