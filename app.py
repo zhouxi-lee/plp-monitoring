@@ -1,27 +1,45 @@
-# ---- Playwright 브라우저 자동 설치 가드 (최상단에 추가) ----
-import os, subprocess, sys
+# ==== Playwright 브라우저 부트스트랩 (Cloud 안전모드) ====
+import os, sys, subprocess, pathlib, shutil
 
-def ensure_playwright_chromium():
-    try:
-        # 캐시 경로 힌트(권장): 환경에 따라 생략 가능
-        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", os.path.expanduser("~/.cache/ms-playwright"))
-        # 설치 여부 테스트: 버전 조회 시도
-        from playwright.sync_api import sync_playwright  # noqa
-        # 간단한 런치 테스트까지 시도하면 더 확실
-        with sync_playwright() as p:
-            p.chromium.launch()  # 실패하면 except로 진입
-        return
-    except Exception:
-        pass
-    # 설치 수행
-    try:
-        # --with-deps 는 Streamlit Cloud에선 불필요(apt로 미리 설치). 실패하면 옵션 없이 재시도.
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-    except Exception:
-        subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
+# 1) 브라우저 캐시 경로를 고정 (런타임/재실행 간 일관성)
+BROWSERS_DIR = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/home/appuser/.cache/ms-playwright"
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS_DIR  # 설치/실행 모두 동일 경로 사용
 
-ensure_playwright_chromium()
-# ---- /자동 설치 가드 끝 ----
+def _chromium_missing() -> bool:
+    p = pathlib.Path(BROWSERS_DIR)
+    if not p.exists():
+        return True
+    # 폴더 구조가 버전마다 달라서, 'headless_shell' 또는 'chrome' 유무로 판별
+    patterns = [
+        "**/chromium-*/chrome-linux/headless_shell",
+        "**/chromium-*/chrome-linux/chrome",
+        "**/chrome-linux/headless_shell",
+        "**/chrome-linux/chrome",
+    ]
+    for pat in patterns:
+        if list(p.glob(pat)):
+            return False
+    return True
+
+def _ensure_playwright_chromium():
+    # 네트워크 허용된 환경이면 매 실행 시 점검 후 필요 시만 설치
+    try:
+        if _chromium_missing() or os.environ.get("FORCE_PW_INSTALL") == "1":
+            # Streamlit Cloud는 시스템 라이브러리는 packages.txt로 설치됨
+            # 여기서는 브라우저 바이너리만 받습니다.
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        # 마지막 시도로 전체 설치
+        try:
+            subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
+        except Exception as e2:
+            raise RuntimeError(f"Playwright 브라우저 설치 실패: {e} / {e2}")
+
+_ensure_playwright_chromium()
+
+# 런치 옵션 강제(컨테이너/Cloud에서 필요한 경우가 많음)
+PLAYWRIGHT_LAUNCH_KW = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+# ==== /부트스트랩 끝 ====
 
 
 # app.py — Streamlit + Playwright (UK ↔ SG)
