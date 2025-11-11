@@ -600,87 +600,83 @@ def _compare_position(page, cmp_loc, card_loc=None):
 
 # ========================= Compare Locator (강화) =========================
 def _find_compare_locator(page, card_locator=None):
-    scope = card_locator if (card_locator and card_locator.count() > 0) else page
-
-    # (A) 컨테이너 클래스에 compare가 박혀있는 케이스 (btn-item compare / c-checkbox-item …)
-    try:
-        cont = scope.locator("[class*='compare' i]").first
-        if cont and cont.count() > 0:
-            # 1) label[for] 우선 (시각적으로 클릭되는 요소)
-            lbl = cont.locator("label[for]").first
+    def _from_container(scope):
+        # 가장 강한 패턴: .btn-item.compare 컨테이너
+        cand = scope.locator(
+            ".btn-item.compare, "                       # LG 공통
+            "[class*='btn-item'][class*='compare' i], "
+            "div[class*='compare' i]"
+        ).filter(has_text=None).first
+        if cand and cand.count() > 0:
+            # 1) label[for] (시각적 클릭 타겟)
+            lbl = cand.locator("label[for]").first
             if lbl and lbl.count() > 0:
                 return lbl
-            # 2) input[type=checkbox] → label[for=id] 승격
-            cb = cont.locator("input[type='checkbox']").first
+            # 2) input[type=checkbox] → label 승격
+            cb = cand.locator("input[type='checkbox']").first
             if cb and cb.count() > 0:
-                try:
-                    _id = cb.get_attribute("id") or ""
-                    if _id:
-                        lab = page.locator(f"label[for='{_id}']").first
-                        if lab and lab.count() > 0:
-                            return lab
-                except Exception:
-                    pass
+                _id = cb.get_attribute("id") or ""
+                if _id:
+                    lab = page.locator(f"label[for='{_id}']").first
+                    if lab and lab.count() > 0:
+                        return lab
                 return cb
             # 3) 버튼/링크류 보조
-            btn = cont.locator("a, button, [role='button'], label").first
+            btn = cand.locator("a, button, [role='button'], label").first
             if btn and btn.count() > 0:
                 return btn
-    except Exception:
-        pass
+        return None
 
-    # (B) input:checkbox → label 승격 (카드 범위 내 일반 패턴)
+    # (A) 카드 범위 우선
+    scope = card_locator if (card_locator and card_locator.count() > 0) else None
+    if scope:
+        hit = _from_container(scope)
+        if hit: return hit
+
+    # (B) 페이지 전역 컨테이너 보강 (카드 밖 푸터/플로팅 등)
+    hit = _from_container(page)
+    if hit: return hit
+
+    # (C) 일반 checkbox → label 승격 (카드 범위)
+    scope = card_locator if (card_locator and card_locator.count() > 0) else page
     try:
-        cb = scope.locator("input[type='checkbox'][name*='compare' i], input[type='checkbox'][id*='compare' i]")
+        cb = scope.locator("input[type='checkbox'][id*='compare' i], input[type='checkbox'][name*='compare' i]")
         if cb.count() == 0:
             cb = scope.locator("input[type='checkbox']")
         if cb.count() > 0:
             el = cb.first
-            try:
-                _id = el.get_attribute("id") or ""
-                if _id:
-                    lbl = page.locator(f"label[for='{_id}']")
-                    if lbl.count() > 0:
-                        return lbl.first
-            except Exception:
-                pass
+            _id = el.get_attribute("id") or ""
+            if _id:
+                lbl = page.locator(f"label[for='{_id}']").first
+                if lbl and lbl.count() > 0:
+                    return lbl
             return el
     except Exception:
         pass
 
-    # (C) data-* / role 토글
+    # (D) role/data-testid 등 보조
     try:
-        cand = scope.locator(
+        aux = scope.locator(
             "[data-compare], [data-testid*='compare' i], [data-test*='compare' i], "
             "[role='switch'][aria-label*='compare' i], [role='checkbox'][aria-label*='compare' i]"
         )
-        if cand.count() > 0:
-            return cand.first
+        if aux.count() > 0:
+            return aux.first
     except Exception:
         pass
 
-    # (D) 텍스트/aria/class 내 compare 키워드
+    # (E) 텍스트/aria/class 검색 (마지막)
     try:
         cand = scope.locator("a, button, label, [role='button']")
         n = cand.count()
-        for i in range(min(n, 60)):
+        for i in range(min(n, 80)):
             el = cand.nth(i)
-            try:
-                txt  = (el.inner_text() or "").strip()
-            except Exception:
-                txt = ""
+            txt  = (el.inner_text() or "")
             aria = (el.get_attribute("aria-label") or "")
             cls  = (el.get_attribute("class") or "")
-            if _contains_compare_text(txt) or _contains_compare_text(aria) or _contains_compare_text(cls):
+            s = f"{txt} {aria} {cls}".lower()
+            if "compare" in s or "비교" in s:
                 return el
-    except Exception:
-        pass
-
-    # (E) 최후: 아무 체크박스나
-    try:
-        cand = scope.locator("input[type='checkbox'], [role='switch'], [role='checkbox']")
-        if cand.count() > 0:
-            return cand.first
     except Exception:
         pass
 
@@ -906,6 +902,8 @@ def fetch_models(url: str, max_models=50):
                 cmpb = _find_compare_locator(page, card)
                 if cmpb:
                     cta_types["Compare_Pos"] = _compare_position(page, cmpb, card)
+                if not cmpb:
+                    cmpb = _find_compare_locator(page, None)    
 
                 # 디버그 출력
                 if debug_log:
