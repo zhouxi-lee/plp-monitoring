@@ -332,43 +332,70 @@ _METRICS_JS = """
 """
 
 def _classify_cta(page, locator):
-    """
-    CTA를 Button/Text로 엄격 분류.
-    - button 태그, role="button", 또는 (c-button|c-btn) 클래스가 있는 경우만 Button
-    - 그 외(a 링크 등)는 Text
-    """
     if not locator or locator.count() == 0:
         return ("Unknown", "Unknown")
-
     try:
         tag  = (locator.evaluate("(n)=>n.tagName") or "").lower()
         role = (locator.get_attribute("role") or "").lower()
         cls  = (locator.get_attribute("class") or "").lower()
 
-        is_button = (
-            tag == "button" or
-            role == "button" or
-            "c-button" in cls or "c-btn" in cls
-        )
-        if not is_button:
+        # 🔹 텍스트형 예외: btn-learn 류는 기본 Text 로 본다 (LG UK 패턴)
+        if "btn-learn" in cls and "c-button" not in cls and "c-btn" not in cls:
             return ("Text", "Unknown")
 
-        # 버튼이면 모양만 판정
-        try:
-            r = locator.evaluate("""(el)=> {
-                const cs = getComputedStyle(el);
-                const vals = (cs.borderRadius || '0').split('/').join(' ')
-                  .split(' ').map(x => parseFloat(x) || 0);
-                const avg = vals.reduce((a,b)=>a+b,0)/(vals.length||1);
-                return avg;
-            }""")
-        except Exception:
-            r = 0
+        # 시각적 버튼성 측정 (자기 + 부모 2단계까지 중 가장 '버튼스러운' 노드 기준)
+        metrics = locator.evaluate("""
+        (el)=>{
+          const px = v => parseFloat(v)||0;
+          const radius = cs => {
+            const vals = (cs.borderRadius||'0').toString().split(/[\\s\\/]+/).map(v=>parseFloat(v)||0);
+            return vals.reduce((a,b)=>a+b,0)/(vals.length||1);
+          };
+          const alphaOf = col => {
+            if(!col) return 0;
+            const m = col.match(/rgba?\\(([^)]+)\\)/);
+            if(!m) return 0;
+            const p = m[1].split(',').map(s=>parseFloat(s));
+            return (p.length===4 && isFinite(p[3])) ? p[3] : ((p[0]+p[1]+p[2])>0?1:0);
+          };
+          function collect(node){
+            const cs = getComputedStyle(node);
+            const padX = px(cs.paddingLeft)+px(cs.paddingRight);
+            const bW   = ["Top","Right","Bottom","Left"].map(s=>px(cs["border"+s+"Width"])).reduce((a,b)=>a+b,0)/4;
+            const avgR = radius(cs);
+            const alpha= alphaOf(cs.backgroundColor);
+            return {padX,bW,avgR,alpha,cls:(node.className||'').toString().toLowerCase(),
+                    tag:(node.tagName||'').toLowerCase()};
+          }
+          let best = collect(el), node = el;
+          for(let i=0;i<2;i++){
+            node = node.parentElement;
+            if(!node) break;
+            const m = collect(node);
+            // 더 버튼스러운 지표면 교체
+            const score = (m.padX>=10) + (m.bW>=1) + (m.avgR>=6) + (m.alpha>0.02) +
+                          (m.cls.includes('c-button')||m.cls.includes('c-btn')||m.tag==='button');
+            const scoreBest = (best.padX>=10) + (best.bW>=1) + (best.avgR>=6) + (best.alpha>0.02) +
+                              (best.cls.includes('c-button')||best.cls.includes('c-btn')||best.tag==='button');
+            if(score > scoreBest) best = m;
+          }
+          return best;
+        }
+        """)
 
-        shape = "Rounded" if float(r) >= 10 else ("Squared" if float(r) >= 1 else "Unknown")
-        if shape == "Unknown":
-            shape = _rounded_from_class_or_css(page, locator)
-        return ("Button", shape)
+        looks_button = (
+            metrics["padX"] >= 10 or
+            metrics["bW"]   >= 1  or
+            metrics["avgR"] >= 6  or
+            metrics["alpha"]> 0.02 or
+            "c-button" in metrics["cls"] or "c-btn" in metrics["cls"] or metrics["tag"] == "button"
+        )
+
+        if not looks_button:
+            return ("Text", "Unknown")
+
+        shape = "Rounded" if metrics["avgR"] >= 10 else ("Squared" if metrics["avgR"] >= 1 else "Unknown")
+        return ("Button", shape if shape != "Unknown" else _rounded_from_class_or_css(page, locator))
     except Exception:
         return ("Text", "Unknown")
 
@@ -535,40 +562,37 @@ _COMPARE_POS_JS = r"""
 }
 """
 def _compare_position(page, cmp_loc, card_loc=None):
-    """카드(rect) 기준 상대좌표로 Bottom-Right 판정 가중."""
     try:
         if not cmp_loc or cmp_loc.count() == 0:
             return UNKNOWN
 
-        # 카드가 없으면 가장 가까운 카드 조상으로 보정
-        if (not card_loc) or card_loc.count() == 0:
-            try:
-                card_loc = cmp_loc.locator(
-                    "xpath=ancestor::li[contains(@class,'product') or contains(@class,'card')][1] | "
-                    "xpath=ancestor::article[contains(@class,'product')][1] | "
-                    "xpath=ancestor::*[contains(@class,'product-card') or contains(@class,'product')][1]"
-                )
-            except Exception:
-                card_loc = None
-
+        # 카드 힌트 없으면 가장 가까운 카드성 조상 자동 추정
+        if not card_loc or card_loc.count() == 0:
+            card_loc = cmp_loc.locator(
+                "xpath=ancestor::li[contains(@class,'product') or contains(@class,'card')][1] | "
+                "xpath=ancestor::article[contains(@class,'product')][1] | "
+                "xpath=ancestor::*[contains(@class,'product-card') or contains(@class,'product') or contains(@class,'grid')][1]"
+            )
         card_el = card_loc.element_handle() if (card_loc and card_loc.count() > 0) else None
 
-        geo = page.evaluate("""(el, card)=>{
-          const target = el;
-          const cr = (card ? card.getBoundingClientRect() : el.parentElement?.getBoundingClientRect()
-                      || document.body.getBoundingClientRect());
-          const er = target.getBoundingClientRect();
-          const w  = Math.max(1, cr.width),   h  = Math.max(1, cr.height);
-          const xC = (er.left + er.right)/2 - cr.left;
-          const yC = (er.top  + er.bottom)/2 - cr.top;
-          return {xC, yC, w, h};
-        }""", cmp_loc.element_handle(), card_el)
+        pos = page.evaluate("""
+        (el, card)=>{
+          const cr = (card ? card.getBoundingClientRect()
+                           : (el.parentElement?.getBoundingClientRect() || document.body.getBoundingClientRect()));
+          const er = el.getBoundingClientRect();
+          const w=Math.max(1, cr.width), h=Math.max(1, cr.height);
+          const xC=(er.left+er.right)/2 - cr.left;
+          const yC=(er.top +er.bottom)/2 - cr.top;
+          return {w,h,xC,yC};
+        }
+        """, cmp_loc.element_handle(), card_el)
 
-        xC, yC, w, h = geo["xC"], geo["yC"], geo["w"], geo["h"]
+        # 임계치: 중앙을 넉넉히(0.45~0.55) 잡아 좌/우 오판 줄임
+        left_edge  = pos["w"] * 0.45
+        right_edge = pos["w"] * 0.55
 
-        # 수평/수직: 우·하단에 가중치 (0.60~0.65 권장)
-        horiz = "Right"  if xC >= w * 0.62 else ("Left" if xC <= w * 0.38 else "Center")
-        vert  = "Bottom" if yC >= h * 0.62 else ("Top"  if yC <= h * 0.35 else "Middle")
+        horiz = "Left" if pos["xC"] <= left_edge else ("Right" if pos["xC"] >= right_edge else "Center")
+        vert  = "Top"  if pos["yC"] <= pos["h"]*0.33 else ("Bottom" if pos["yC"] >= pos["h"]*0.67 else "Middle")
 
         return f"{vert}-{horiz}"
     except Exception:
@@ -578,47 +602,83 @@ def _compare_position(page, cmp_loc, card_loc=None):
 def _find_compare_locator(page, card_locator=None):
     scope = card_locator if (card_locator and card_locator.count() > 0) else page
 
-    # 1) 카드 범위 우선: compare 관련 체크박스/라벨
+    # (A) 컨테이너 클래스에 compare가 박혀있는 케이스 (btn-item compare / c-checkbox-item …)
     try:
-        cand = scope.locator(
-            "label[for*='compare' i], "
-            "input[type='checkbox'][id*='compare' i], "
-            "input[type='checkbox'][name*='compare' i]"
-        )
-        if cand.count() > 0:
-            return cand.first
+        cont = scope.locator("[class*='compare' i]").first
+        if cont and cont.count() > 0:
+            # 1) label[for] 우선 (시각적으로 클릭되는 요소)
+            lbl = cont.locator("label[for]").first
+            if lbl and lbl.count() > 0:
+                return lbl
+            # 2) input[type=checkbox] → label[for=id] 승격
+            cb = cont.locator("input[type='checkbox']").first
+            if cb and cb.count() > 0:
+                try:
+                    _id = cb.get_attribute("id") or ""
+                    if _id:
+                        lab = page.locator(f"label[for='{_id}']").first
+                        if lab and lab.count() > 0:
+                            return lab
+                except Exception:
+                    pass
+                return cb
+            # 3) 버튼/링크류 보조
+            btn = cont.locator("a, button, [role='button'], label").first
+            if btn and btn.count() > 0:
+                return btn
     except Exception:
         pass
 
-    # 2) data-* / test id / role
+    # (B) input:checkbox → label 승격 (카드 범위 내 일반 패턴)
+    try:
+        cb = scope.locator("input[type='checkbox'][name*='compare' i], input[type='checkbox'][id*='compare' i]")
+        if cb.count() == 0:
+            cb = scope.locator("input[type='checkbox']")
+        if cb.count() > 0:
+            el = cb.first
+            try:
+                _id = el.get_attribute("id") or ""
+                if _id:
+                    lbl = page.locator(f"label[for='{_id}']")
+                    if lbl.count() > 0:
+                        return lbl.first
+            except Exception:
+                pass
+            return el
+    except Exception:
+        pass
+
+    # (C) data-* / role 토글
     try:
         cand = scope.locator(
             "[data-compare], [data-testid*='compare' i], [data-test*='compare' i], "
-            "[role='checkbox'][aria-label*='compare' i], [role='switch'][aria-label*='compare' i]"
+            "[role='switch'][aria-label*='compare' i], [role='checkbox'][aria-label*='compare' i]"
         )
         if cand.count() > 0:
             return cand.first
     except Exception:
         pass
 
-    # 3) 텍스트/aria/class에 compare 포함된 a/button/label
+    # (D) 텍스트/aria/class 내 compare 키워드
     try:
         cand = scope.locator("a, button, label, [role='button']")
         n = cand.count()
-        for i in range(min(n, 50)):
+        for i in range(min(n, 60)):
             el = cand.nth(i)
-            txt  = (el.inner_text() or "")
+            try:
+                txt  = (el.inner_text() or "").strip()
+            except Exception:
+                txt = ""
             aria = (el.get_attribute("aria-label") or "")
             cls  = (el.get_attribute("class") or "")
-            s = f"{txt} {aria} {cls}".lower()
-            if "compare" in s or "비교" in s:
+            if _contains_compare_text(txt) or _contains_compare_text(aria) or _contains_compare_text(cls):
                 return el
     except Exception:
         pass
 
-    # 4) 마지막: 카드 내부 임의 체크류
+    # (E) 최후: 아무 체크박스나
     try:
-        cand = scope.locator("input[type='checkbox'], [role='checkbox'], [role='switch']")
+        cand = scope.locator("input[type='checkbox'], [role='switch'], [role='checkbox']")
         if cand.count() > 0:
             return cand.first
     except Exception:
