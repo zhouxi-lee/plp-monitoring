@@ -105,7 +105,7 @@ if add_pair:
     if _valid_url(url_as) and _valid_url(url_tb):
         st.session_state.url_pairs = [{"as": url_as.strip(), "to": url_tb.strip()}]  # 단일 페어만 유지
         try:
-            st.experimental_set_query_params(as=url_as.strip(), to=url_tb.strip())
+            st.experimental_set_query_params(**{"as": url_as.strip(), "to": url_tb.strip()})
         except Exception:
             pass
         st.success("URL 페어를 추가했습니다.")
@@ -951,7 +951,7 @@ if run_btn:
     if (not st.session_state.url_pairs) and _valid_url(url_as) and _valid_url(url_tb):
         st.session_state.url_pairs = [{"as": url_as.strip(), "to": url_tb.strip()}]
         try:
-            st.experimental_set_query_params(as=url_as.strip(), to=url_tb.strip())
+            st.experimental_set_query_params(**{"as": url_as.strip(), "to": url_tb.strip()})
         except Exception:
             pass
 
