@@ -332,18 +332,40 @@ _METRICS_JS = """
 """
 
 def _classify_cta(page, locator):
-    if not locator or locator.count()==0:
+    """
+    Learn / Buy CTA → Button/Text + Shape
+    NOTE: A-tag + no major button class → Text 취급
+    """
+    if not locator or locator.count() == 0:
         return ("Unknown", "Unknown")
+
     try:
-        m = locator.evaluate(_METRICS_JS)
-        is_button_like = (
-            "btn" in m["cls"] or "button" in m["cls"] or "cta" in m["cls"] or
-            m["nodeTag"] == "button" or
-            (m["padX"] >= 10 and (m["alpha"] > 0.02 or m["borderW"] >= 1 or m["avgRadius"] >= 6))
-        )
-        shape = "Rounded" if m["avgRadius"] >= 10 else ("Squared" if m["avgRadius"] >= 1 else "Unknown")
-        typ = "Button+Icon" if (is_button_like and m.get("hasIcon")) else ("Button" if is_button_like else "Text")
-        return (typ, shape if typ.startswith("Button") else "Unknown")
+        tag = (locator.evaluate("(n)=>n.tagName") or "").lower()
+        cls = (locator.get_attribute("class") or "").lower()
+
+        # 1) Strong button detection
+        if tag == "button":
+            chk = locator
+            t, s = "Button", "Unknown"
+        elif "c-button" in cls or "c-btn" in cls:
+            chk = locator
+            t, s = "Button", "Unknown"
+        elif locator.get_attribute("role") == "button":
+            chk = locator
+            t, s = "Button", "Unknown"
+        else:
+            # NOT button → force text
+            return ("Text", "Unknown")
+
+        # 2) shape check
+        u, sh = _classify_cta_metrics(locator)
+
+        # fallback to squared vs rounded
+        if sh == "Unknown":
+            sh = _rounded_from_class_or_css(page, locator)
+
+        return (t, sh)
+
     except Exception:
         return ("Text", "Unknown")
 
@@ -510,12 +532,59 @@ _COMPARE_POS_JS = r"""
 }
 """
 def _compare_position(page, cmp_loc, card_loc=None):
+    """
+    Compare 위치 계산 → Bottom-Right 보정 강화
+    """
     try:
-        if not cmp_loc or cmp_loc.count()==0: return UNKNOWN
+        if not cmp_loc or cmp_loc.count() == 0:
+            return UNKNOWN
+
         card_el = card_loc.element_handle() if (card_loc and card_loc.count()>0) else None
         pos = page.evaluate(_COMPARE_POS_JS, cmp_loc.element_handle(), card_el)
-        if not pos: return UNKNOWN
-        return f"{pos['vert']}-{pos['horiz']}"
+
+        if not pos:
+            return UNKNOWN
+
+        horiz = pos.get("horiz", "Unknown")
+        vert  = pos.get("vert",  "Unknown")
+
+        # ---- 보정 규칙 ----
+        # > 카드 기준 오른쪽 60% 이상 → Right
+        # > 카드 기준 하단 40% 이상 → Bottom
+        js2 = """
+        (el, card)=>{
+          const er = el.getBoundingClientRect();
+          const cr = card ? card.getBoundingClientRect() : document.body.getBoundingClientRect();
+          const xC = (er.left + er.right)/2 - cr.left;
+          const yC = (er.top + er.bottom)/2 - cr.top;
+          const w  = cr.width;
+          const h  = cr.height;
+          return { xC, yC, w, h };
+        }
+        """
+        geo = page.evaluate(js2, cmp_loc.element_handle(), card_el)
+
+        xC = geo["xC"]
+        yC = geo["yC"]
+        w  = geo["w"]
+        h  = geo["h"]
+
+        if xC > w * 0.55:
+            horiz = "Right"
+        elif xC < w * 0.35:
+            horiz = "Left"
+        else:
+            horiz = "Center"
+
+        if yC > h * 0.6:
+            vert = "Bottom"
+        elif yC < h * 0.35:
+            vert = "Top"
+        else:
+            vert = "Middle"
+
+        return f"{vert}-{horiz}"
+
     except Exception:
         return UNKNOWN
 
