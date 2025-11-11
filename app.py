@@ -333,8 +333,11 @@ _METRICS_JS = """
 
 def _classify_cta(page, locator):
     """
-    Learn / Buy CTA → Button/Text + Shape
-    NOTE: A-tag + no major button class → Text 취급
+    CTA를 Button/Text로 엄격 분류.
+    - button 태그
+    - a 태그 + (c-button|c-btn) 클래스
+    - role="button"
+    이 3가지 중 하나만 만족하면 Button, 아니면 Text.
     """
     if not locator or locator.count() == 0:
         return ("Unknown", "Unknown")
@@ -342,30 +345,35 @@ def _classify_cta(page, locator):
     try:
         tag = (locator.evaluate("(n)=>n.tagName") or "").lower()
         cls = (locator.get_attribute("class") or "").lower()
+        role= (locator.get_attribute("role") or "").lower()
 
-        # 1) Strong button detection
-        if tag == "button":
-            chk = locator
-            t, s = "Button", "Unknown"
-        elif "c-button" in cls or "c-btn" in cls:
-            chk = locator
-            t, s = "Button", "Unknown"
-        elif locator.get_attribute("role") == "button":
-            chk = locator
-            t, s = "Button", "Unknown"
-        else:
-            # NOT button → force text
+        is_button = (
+            tag == "button" or
+            "c-button" in cls or "c-btn" in cls or
+            role == "button"
+        )
+
+        if not is_button:
+            # 링크형 Learn more는 텍스트로 확정
             return ("Text", "Unknown")
 
-        # 2) shape check
-        u, sh = _classify_cta_metrics(locator)
+        # 버튼이면 모양만 판정
+        try:
+            r = locator.evaluate("""(el)=> {
+                const cs = getComputedStyle(el);
+                const vals = (cs.borderRadius || '0').split('/').join(' ')
+                  .split(' ').map(x => parseFloat(x) || 0);
+                const avg = vals.reduce((a,b)=>a+b,0)/(vals.length||1);
+                return avg;
+            }""")
+        except Exception:
+            r = 0
 
-        # fallback to squared vs rounded
-        if sh == "Unknown":
-            sh = _rounded_from_class_or_css(page, locator)
+        shape = "Rounded" if float(r) >= 10 else ("Squared" if float(r) >= 1 else "Unknown")
+        if shape == "Unknown":
+            shape = _rounded_from_class_or_css(page, locator)
 
-        return (t, sh)
-
+        return ("Button", shape)
     except Exception:
         return ("Text", "Unknown")
 
@@ -532,59 +540,42 @@ _COMPARE_POS_JS = r"""
 }
 """
 def _compare_position(page, cmp_loc, card_loc=None):
-    """
-    Compare 위치 계산 → Bottom-Right 보정 강화
-    """
+    """카드 기준 상대 좌표로 Bottom-Right를 더 잘 맞추는 보정."""
     try:
         if not cmp_loc or cmp_loc.count() == 0:
             return UNKNOWN
 
         card_el = card_loc.element_handle() if (card_loc and card_loc.count()>0) else None
-        pos = page.evaluate(_COMPARE_POS_JS, cmp_loc.element_handle(), card_el)
 
-        if not pos:
-            return UNKNOWN
-
-        horiz = pos.get("horiz", "Unknown")
-        vert  = pos.get("vert",  "Unknown")
-
-        # ---- 보정 규칙 ----
-        # > 카드 기준 오른쪽 60% 이상 → Right
-        # > 카드 기준 하단 40% 이상 → Bottom
-        js2 = """
-        (el, card)=>{
+        geo = page.evaluate("""(el, card)=>{
+          const cr = (card ? card.getBoundingClientRect() : document.body.getBoundingClientRect());
           const er = el.getBoundingClientRect();
-          const cr = card ? card.getBoundingClientRect() : document.body.getBoundingClientRect();
           const xC = (er.left + er.right)/2 - cr.left;
-          const yC = (er.top + er.bottom)/2 - cr.top;
-          const w  = cr.width;
-          const h  = cr.height;
-          return { xC, yC, w, h };
-        }
-        """
-        geo = page.evaluate(js2, cmp_loc.element_handle(), card_el)
+          const yC = (er.top  + er.bottom)/2 - cr.top;
+          const w  = Math.max(1, cr.width);
+          const h  = Math.max(1, cr.height);
+          return {xC, yC, w, h};
+        }""", cmp_loc.element_handle(), card_el)
 
-        xC = geo["xC"]
-        yC = geo["yC"]
-        w  = geo["w"]
-        h  = geo["h"]
+        xC, yC, w, h = geo["xC"], geo["yC"], geo["w"], geo["h"]
 
-        if xC > w * 0.55:
+        # 수평: 오른쪽 가중치 ↑
+        if xC >= w * 0.58:
             horiz = "Right"
-        elif xC < w * 0.35:
+        elif xC <= w * 0.42:
             horiz = "Left"
         else:
             horiz = "Center"
 
-        if yC > h * 0.6:
+        # 수직: 하단 가중치 ↑
+        if yC >= h * 0.62:
             vert = "Bottom"
-        elif yC < h * 0.35:
+        elif yC <= h * 0.35:
             vert = "Top"
         else:
             vert = "Middle"
 
         return f"{vert}-{horiz}"
-
     except Exception:
         return UNKNOWN
 
