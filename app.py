@@ -1,7 +1,7 @@
 # ==== Playwright 브라우저 부트스트랩 (Cloud 안전모드) ====
-import os, sys, subprocess, pathlib, shutil
+import os, sys, subprocess, pathlib
 
-# 1) 브라우저 캐시 경로를 고정 (런타임/재실행 간 일관성)
+# 브라우저 캐시 경로 고정
 BROWSERS_DIR = os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "/home/appuser/.cache/ms-playwright"
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSERS_DIR  # 설치/실행 모두 동일 경로 사용
 
@@ -25,20 +25,21 @@ def _ensure_playwright_chromium():
     # 네트워크 허용된 환경이면 매 실행 시 점검 후 필요 시만 설치
     try:
         if _chromium_missing() or os.environ.get("FORCE_PW_INSTALL") == "1":
-            # Streamlit Cloud는 시스템 라이브러리는 packages.txt로 설치됨
-            # 여기서는 브라우저 바이너리만 받습니다.
             subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
     except Exception as e:
         # 마지막 시도로 전체 설치
-        try:
-            subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
-        except Exception as e2:
-            raise RuntimeError(f"Playwright 브라우저 설치 실패: {e} / {e2}")
+        subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
 
 _ensure_playwright_chromium()
 
 # 런치 옵션 강제(컨테이너/Cloud에서 필요한 경우가 많음)
 PLAYWRIGHT_LAUNCH_KW = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+
+# (선택) 설치 상태 로깅
+try:
+    print("[PW] browsers path =", BROWSERS_DIR, " / chromium exists? =", (not _chromium_missing()))
+except Exception:
+    pass
 # ==== /부트스트랩 끝 ====
 
 
@@ -274,7 +275,6 @@ _METRICS_JS = """
     const radNum = (v)=>{
       if(!v) return 0;
       v = v.toString();
-      // % 라디우스(예: 50%)나 '9999px'은 pill 로 취급
       if (v.includes('%')) return 9999;
       const n = parseFloat(v);
       return isFinite(n) ? n : 0;
@@ -288,7 +288,6 @@ _METRICS_JS = """
     const avgRadius = corners.reduce((a,b)=>a+b,0)/(corners.length||1);
     const padX = px(cs.paddingLeft) + px(cs.paddingRight);
 
-    // 배경 투명도 계산
     const bg = cs.backgroundColor || "rgba(0,0,0,0)";
     const m = bg.match(/rgba?\\(([^)]+)\\)/);
     let alpha = 0;
@@ -311,7 +310,6 @@ _METRICS_JS = """
     node = node.parentElement;
     if(!node) break;
     const m = collect(node);
-    // 버튼 시그널이 더 강하면 교체
     const scoreBest = (best.padX>0) + (best.alpha>0.05) + (best.borderW>=1) + (best.avgRadius>=6) + (best.cls.includes('btn')||best.cls.includes('cta'));
     const scoreNew  = (m.padX>0) + (m.alpha>0.05) + (m.borderW>=1) + (m.avgRadius>=6) + (m.cls.includes('btn')||m.cls.includes('cta'));
     if (scoreNew > scoreBest) best = m;
@@ -332,7 +330,6 @@ def _classify_cta(page, locator):
             m["nodeTag"] == "button" or
             (m["padX"] >= 10 and (m["alpha"] > 0.02 or m["borderW"] >= 1 or m["avgRadius"] >= 6))
         )
-        # 라디우스 9999/50% 등은 'Rounded' 취급됨
         shape = "Rounded" if m["avgRadius"] >= 10 else ("Squared" if m["avgRadius"] >= 1 else "Unknown")
         typ = "Button+Icon" if (is_button_like and m.get("hasIcon")) else ("Button" if is_button_like else "Text")
         return (typ, shape if typ.startswith("Button") else "Unknown")
@@ -345,7 +342,7 @@ def classify_template_sample(url: str):
     NAV_TMO, IDLE_TMO = 35000, 9000
     result = {"LearnMore_Type": "Text", "BuyNow_Shape": "Squared", "Compare_Pos": "Center"}
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
         ctx = browser.new_context(viewport=VIEWPORT, ignore_https_errors=True)
         page = ctx.new_page()
         try:
@@ -376,7 +373,7 @@ def classify_template_sample(url: str):
                     result["BuyNow_Shape"] = _btn_shape(buy)
         except Exception:
             pass
-        browser.close()
+        ctx.close(); browser.close()
     return result
 
 # =========================
@@ -391,8 +388,9 @@ def fetch_models(url: str, max_models=50):
     NAV_TMO = int(timeout_sec * 1000)
     IDLE_TMO = int(max(5, timeout_sec - 4) * 1000)
 
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
         ctx = browser.new_context(
             viewport=vp,
             extra_http_headers={"Accept-Language": accept_lang},
