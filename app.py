@@ -334,27 +334,23 @@ _METRICS_JS = """
 def _classify_cta(page, locator):
     """
     CTA를 Button/Text로 엄격 분류.
-    - button 태그
-    - a 태그 + (c-button|c-btn) 클래스
-    - role="button"
-    이 3가지 중 하나만 만족하면 Button, 아니면 Text.
+    - button 태그, role="button", 또는 (c-button|c-btn) 클래스가 있는 경우만 Button
+    - 그 외(a 링크 등)는 Text
     """
     if not locator or locator.count() == 0:
         return ("Unknown", "Unknown")
 
     try:
-        tag = (locator.evaluate("(n)=>n.tagName") or "").lower()
-        cls = (locator.get_attribute("class") or "").lower()
-        role= (locator.get_attribute("role") or "").lower()
+        tag  = (locator.evaluate("(n)=>n.tagName") or "").lower()
+        role = (locator.get_attribute("role") or "").lower()
+        cls  = (locator.get_attribute("class") or "").lower()
 
         is_button = (
             tag == "button" or
-            "c-button" in cls or "c-btn" in cls or
-            role == "button"
+            role == "button" or
+            "c-button" in cls or "c-btn" in cls
         )
-
         if not is_button:
-            # 링크형 Learn more는 텍스트로 확정
             return ("Text", "Unknown")
 
         # 버튼이면 모양만 판정
@@ -372,7 +368,6 @@ def _classify_cta(page, locator):
         shape = "Rounded" if float(r) >= 10 else ("Squared" if float(r) >= 1 else "Unknown")
         if shape == "Unknown":
             shape = _rounded_from_class_or_css(page, locator)
-
         return ("Button", shape)
     except Exception:
         return ("Text", "Unknown")
@@ -540,40 +535,40 @@ _COMPARE_POS_JS = r"""
 }
 """
 def _compare_position(page, cmp_loc, card_loc=None):
-    """카드 기준 상대 좌표로 Bottom-Right를 더 잘 맞추는 보정."""
+    """카드(rect) 기준 상대좌표로 Bottom-Right 판정 가중."""
     try:
         if not cmp_loc or cmp_loc.count() == 0:
             return UNKNOWN
 
-        card_el = card_loc.element_handle() if (card_loc and card_loc.count()>0) else None
+        # 카드가 없으면 가장 가까운 카드 조상으로 보정
+        if (not card_loc) or card_loc.count() == 0:
+            try:
+                card_loc = cmp_loc.locator(
+                    "xpath=ancestor::li[contains(@class,'product') or contains(@class,'card')][1] | "
+                    "xpath=ancestor::article[contains(@class,'product')][1] | "
+                    "xpath=ancestor::*[contains(@class,'product-card') or contains(@class,'product')][1]"
+                )
+            except Exception:
+                card_loc = None
+
+        card_el = card_loc.element_handle() if (card_loc and card_loc.count() > 0) else None
 
         geo = page.evaluate("""(el, card)=>{
-          const cr = (card ? card.getBoundingClientRect() : document.body.getBoundingClientRect());
-          const er = el.getBoundingClientRect();
+          const target = el;
+          const cr = (card ? card.getBoundingClientRect() : el.parentElement?.getBoundingClientRect()
+                      || document.body.getBoundingClientRect());
+          const er = target.getBoundingClientRect();
+          const w  = Math.max(1, cr.width),   h  = Math.max(1, cr.height);
           const xC = (er.left + er.right)/2 - cr.left;
           const yC = (er.top  + er.bottom)/2 - cr.top;
-          const w  = Math.max(1, cr.width);
-          const h  = Math.max(1, cr.height);
           return {xC, yC, w, h};
         }""", cmp_loc.element_handle(), card_el)
 
         xC, yC, w, h = geo["xC"], geo["yC"], geo["w"], geo["h"]
 
-        # 수평: 오른쪽 가중치 ↑
-        if xC >= w * 0.58:
-            horiz = "Right"
-        elif xC <= w * 0.42:
-            horiz = "Left"
-        else:
-            horiz = "Center"
-
-        # 수직: 하단 가중치 ↑
-        if yC >= h * 0.62:
-            vert = "Bottom"
-        elif yC <= h * 0.35:
-            vert = "Top"
-        else:
-            vert = "Middle"
+        # 수평/수직: 우·하단에 가중치 (0.60~0.65 권장)
+        horiz = "Right"  if xC >= w * 0.62 else ("Left" if xC <= w * 0.38 else "Center")
+        vert  = "Bottom" if yC >= h * 0.62 else ("Top"  if yC <= h * 0.35 else "Middle")
 
         return f"{vert}-{horiz}"
     except Exception:
@@ -583,56 +578,47 @@ def _compare_position(page, cmp_loc, card_loc=None):
 def _find_compare_locator(page, card_locator=None):
     scope = card_locator if (card_locator and card_locator.count() > 0) else page
 
-    # 1) input:checkbox → label[for] 승격
-    try:
-        cb = scope.locator("input[type='checkbox'][name*='compare' i], input[type='checkbox'][id*='compare' i]")
-        if cb.count() == 0:
-            cb = scope.locator("input[type='checkbox']")
-        if cb.count() > 0:
-            el = cb.first
-            try:
-                _id = el.get_attribute("id") or ""
-                if _id:
-                    lbl = page.locator(f"label[for='{_id}']")
-                    if lbl.count() > 0:
-                        return lbl.first
-            except Exception:
-                pass
-            return el
-    except Exception:
-        pass
-
-    # 2) data-속성 / role 토글류
+    # 1) 카드 범위 우선: compare 관련 체크박스/라벨
     try:
         cand = scope.locator(
-            "[data-compare], [data-testid*='compare' i], [data-test*='compare' i], "
-            "[role='switch'][aria-label*='compare' i], [role='checkbox'][aria-label*='compare' i]"
+            "label[for*='compare' i], "
+            "input[type='checkbox'][id*='compare' i], "
+            "input[type='checkbox'][name*='compare' i]"
         )
         if cand.count() > 0:
             return cand.first
     except Exception:
         pass
 
-    # 3) 텍스트/aria/class 내 compare류 키워드
+    # 2) data-* / test id / role
+    try:
+        cand = scope.locator(
+            "[data-compare], [data-testid*='compare' i], [data-test*='compare' i], "
+            "[role='checkbox'][aria-label*='compare' i], [role='switch'][aria-label*='compare' i]"
+        )
+        if cand.count() > 0:
+            return cand.first
+    except Exception:
+        pass
+
+    # 3) 텍스트/aria/class에 compare 포함된 a/button/label
     try:
         cand = scope.locator("a, button, label, [role='button']")
         n = cand.count()
         for i in range(min(n, 50)):
             el = cand.nth(i)
-            try:
-                txt = (el.inner_text() or "").strip()
-            except Exception:
-                txt = ""
+            txt  = (el.inner_text() or "")
             aria = (el.get_attribute("aria-label") or "")
             cls  = (el.get_attribute("class") or "")
-            if _contains_compare_text(txt) or _contains_compare_text(aria) or _contains_compare_text(cls):
+            s = f"{txt} {aria} {cls}".lower()
+            if "compare" in s or "비교" in s:
                 return el
     except Exception:
         pass
 
-    # 4) 마지막: 카드 내 임의 checkbox/토글
+    # 4) 마지막: 카드 내부 임의 체크류
     try:
-        cand = scope.locator("input[type='checkbox'], [role='switch'], [role='checkbox']")
+        cand = scope.locator("input[type='checkbox'], [role='checkbox'], [role='switch']")
         if cand.count() > 0:
             return cand.first
     except Exception:
