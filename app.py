@@ -37,10 +37,8 @@ PLAYWRIGHT_LAUNCH_KW = {"headless": True, "args": ["--no-sandbox", "--disable-de
 
 # app.py — Streamlit + Playwright (UK ↔ SG)
 # Network-first + DOM fallback + deep JSON (__NEXT_DATA__/window)
-# GraphQL POST sniffing + text/plain JSON 파싱 + PDP 폴백
-# 타임아웃/재시도/리소스차단 + 첫 모델 강제 비교 + SKU(점 앞 베이스) 허용
-# Learn More 버튼/텍스트 판정: CSS 메트릭 기반(_classify_cta)
-# Compare: 다국어/체크박스/label 승격/role/data-testid 기반 강인 탐색 + 상대좌표 위치 계산
+# GraphQL sniffing + PDP 폴백 + 재시도/타임아웃/리소스차단
+# CTA(Button/Text, Rounded/Squared) 판정 + Compare 위치(Top/Middle/Bottom × Left/Center/Right)
 
 import sys, asyncio
 if sys.platform.startswith("win"):
@@ -57,17 +55,10 @@ st.set_page_config(page_title="PLP 카드 비교 (UK ↔ SG)", layout="wide")
 st.markdown("# 🧩 PLP 상품 카드 비교")
 st.caption("Network-first + DOM fallback + deep JSON + GraphQL sniffing (retry/timeout)")
 
-# --- URL 상태/히스토리 관리 ---
-if "url_pairs" not in st.session_state:
-    st.session_state.url_pairs = []
-
-# 쿼리스트링 프리필 (?as=https://...&to=https://...)
-try:
-    qs = st.experimental_get_query_params()
-except Exception:
-    qs = {}
-prefill_as = qs.get("as", [""])[0] if isinstance(qs, dict) else ""
-prefill_to = qs.get("to", [""])[0] if isinstance(qs, dict) else ""
+# URL 쿼리스트링으로 초기값 세팅 지원 (?as=...&to=...)
+qs = st.query_params if hasattr(st, "query_params") else {}
+init_as = (qs.get("as") if isinstance(qs, dict) else None) or "https://www.lg.com/uk/tvs-soundbars/oled-evo/"
+init_to = (qs.get("to") if isinstance(qs, dict) else None) or "https://www.lg.com/sg/tvs-soundbars/oled-evo/"
 
 with st.sidebar:
     st.markdown("### 실행 옵션")
@@ -78,52 +69,23 @@ with st.sidebar:
     timeout_sec = st.number_input("⏱ 페이지 대기 시간(초)", min_value=5, max_value=60, value=30, step=1)
     retries     = st.slider("🔄 재시도 횟수", min_value=0, max_value=3, value=1)
 
-# --- URL 입력 (폼) ---
-with st.form("url_input_form", clear_on_submit=False):
-    st.markdown("### 비교할 PLP 페이지 URL 입력")
-    url_as = st.text_input("AS-IS URL (예: UK/원본)", value=prefill_as, placeholder="https://www.lg.com/uk/tvs-soundbars/oled-evo/")
-    url_tb = st.text_input("TO-BE URL (예: SG/비교대상)", value=prefill_to, placeholder="https://www.lg.com/sg/tvs-soundbars/oled-evo/")
+col1, col2 = st.columns(2)
+with col1:
+    url_as = st.text_input("AS-IS URL (UK/원본)", init_as, key="inp_as")
+with col2:
+    url_tb = st.text_input("TO-BE URL (SG/비교대상)", init_to, key="inp_to")
 
-    cols = st.columns([1,1,1,2])
-    with cols[0]:
-        add_pair = st.form_submit_button("➕ 페어 추가")
-    with cols[1]:
-        clear_pairs = st.form_submit_button("🧹 초기화")
-    with cols[2]:
-        run_btn = st.form_submit_button("▶ 실행 (Network-first)")
-
-# 입력 유효성 보조: 비어있으면 실행 방지
-def _valid_url(u: str) -> bool:
-    try:
-        p = urlparse(u)
-        return bool(p.scheme in ("http", "https") and p.netloc)
-    except Exception:
-        return False
-
-# 폼 액션 처리
-if add_pair:
-    if _valid_url(url_as) and _valid_url(url_tb):
-        st.session_state.url_pairs = [{"as": url_as.strip(), "to": url_tb.strip()}]  # 단일 페어만 유지
-        try:
-            st.experimental_set_query_params(**{"as": url_as.strip(), "to": url_tb.strip()})
-        except Exception:
-            pass
-        st.success("URL 페어를 추가했습니다.")
+# 쿼리파라미터 동기화(오류 방지용 try)
+try:
+    if hasattr(st, "query_params"):
+        st.query_params["as"] = url_as.strip()
+        st.query_params["to"] = url_tb.strip()
     else:
-        st.error("두 URL 모두 유효한 형식이어야 합니다 (http/https 포함).")
+        st.experimental_set_query_params(as_=url_as.strip(), to=url_tb.strip())  # 구버전 호환
+except Exception:
+    pass
 
-if clear_pairs:
-    st.session_state.url_pairs = []
-    try:
-        st.experimental_set_query_params()
-    except Exception:
-        pass
-    st.info("저장된 URL 페어를 초기화했습니다.")
-
-# 폼 아래 미리보기
-if st.session_state.url_pairs:
-    st.markdown("#### 현재 선택된 URL 페어")
-    st.write(st.session_state.url_pairs[0]["as"], " ↔ ", st.session_state.url_pairs[0]["to"])
+run_btn = st.button("실행 (Network-first)", key="run_main")
 
 # ========================= 공통 상수/유틸 =========================
 MODEL_PATTERNS = [
@@ -132,7 +94,7 @@ MODEL_PATTERNS = [
     r"\b[A-Z]{2,}\d{2,}\b"
 ]
 UNKNOWN = "Unknown"
-UNSET = object()  # CTA 초기 상태 보호용
+UNSET = object()
 
 PRODUCT_ALLOW = ("/api/","/v1/","/v2/","/graphql","/search","/catalog","/commerce",
                  "/product","/plp","/listing","/lgecom","/pim","/sku","/model","/category")
@@ -229,10 +191,10 @@ def wait_until_ready(page, idle_ms: int, debug=False) -> bool:
         except Exception: pass
     return False
 
-# ========================= Compare 다국어 키워드/유틸 =========================
+# ========================= Compare 다국어 키워드 =========================
 COMPARE_TEXTS = [
     "compare", "비교", "vergleich", "comparer", "comparar", "confronta",
-    "比較", "비교하기", "비교함", "vergelijk", "comparação"
+    "比較", "비교하기", "vergelijk", "comparação"
 ]
 def _contains_compare_text(s: str) -> bool:
     if not s: return False
@@ -288,114 +250,44 @@ _METRICS_JS = """
   function collect(node){
     const cs = getComputedStyle(node);
     const px = (v)=>parseFloat(v)||0;
-    const radNum = (v)=>{
-      if(!v) return 0;
-      v = v.toString();
-      if (v.includes('%')) return 9999;
-      const n = parseFloat(v);
-      return isFinite(n) ? n : 0;
-    };
-    const corners = [
-      radNum(cs.borderTopLeftRadius),
-      radNum(cs.borderTopRightRadius),
-      radNum(cs.borderBottomRightRadius),
-      radNum(cs.borderBottomLeftRadius)
-    ];
+    const radNum = (v)=>{ if(!v) return 0; v=v.toString(); if(v.includes('%')) return 9999; const n=parseFloat(v); return isFinite(n)?n:0; };
+    const corners = [radNum(cs.borderTopLeftRadius),radNum(cs.borderTopRightRadius),radNum(cs.borderBottomRightRadius),radNum(cs.borderBottomLeftRadius)];
     const avgRadius = corners.reduce((a,b)=>a+b,0)/(corners.length||1);
-    const padX = px(cs.paddingLeft) + px(cs.paddingRight);
+    const padX = px(cs.paddingLeft)+px(cs.paddingRight);
     const bg = cs.backgroundColor || "rgba(0,0,0,0)";
-    const m = bg.match(/rgba?\\(([^)]+)\\)/);
-    let alpha = 0;
-    if (m){
-      const p = m[1].split(",").map(s=>parseFloat(s));
-      alpha = (p.length===4 ? (isFinite(p[3])?p[3]:0) : ((p[0]+p[1]+p[2])>0?1:0));
-    }
+    const m = bg.match(/rgba?\\(([^)]+)\\)/); let alpha=0;
+    if(m){ const p = m[1].split(",").map(s=>parseFloat(s)); alpha = (p.length===4 ? (isFinite(p[3])?p[3]:0) : ((p[0]+p[1]+p[2])>0?1:0)); }
     const borderW = ["Top","Right","Bottom","Left"].map(s=>px(cs["border"+s+"Width"])).reduce((a,b)=>a+b,0)/4;
-    const deco = cs.textDecorationLine || "";
     const cls  = (node.className || "").toString().toLowerCase();
-    const tag  = (node.tagName || "").toLowerCase();
+    const tag  = (node.tagName  || "").toLowerCase();
     const hasIcon = !!(node.querySelector("svg,i,[class*='icon'],[class*='ico'],[class*='chevron']"));
-    return { nodeTag: tag, cls, padX, avgRadius, alpha, borderW, deco, hasIcon };
+    return { nodeTag: tag, cls, padX, avgRadius, alpha, borderW, hasIcon };
   }
-  let node = el, best = collect(el), depth = 0;
-  while (node && depth < 3){
-    node = node.parentElement;
-    if(!node) break;
-    const m = collect(node);
-    const scoreBest = (best.padX>0) + (best.alpha>0.05) + (best.borderW>=1) + (best.avgRadius>=6) + (best.cls.includes('btn')||best.cls.includes('cta'));
-    const scoreNew  = (m.padX>0) + (m.alpha>0.05) + (m.borderW>=1) + (m.avgRadius>=6) + (m.cls.includes('btn')||m.cls.includes('cta'));
-    if (scoreNew > scoreBest) best = m;
-    depth++;
+  let node=el, best=collect(el), depth=0;
+  while(node && depth<3){
+    node=node.parentElement; if(!node) break;
+    const m=collect(node);
+    const sBest=(best.padX>0)+(best.alpha>0.05)+(best.borderW>=1)+(best.avgRadius>=6)+(best.cls.includes('btn')||best.cls.includes('cta'));
+    const sNew =(m.padX>0)+(m.alpha>0.05)+(m.borderW>=1)+(m.avgRadius>=6)+(m.cls.includes('btn')||m.cls.includes('cta'));
+    if(sNew>sBest) best=m; depth++;
   }
   return best;
 }
 """
 
 def _classify_cta(page, locator):
-    if not locator or locator.count() == 0:
+    if not locator or locator.count()==0:
         return ("Unknown", "Unknown")
     try:
-        tag  = (locator.evaluate("(n)=>n.tagName") or "").lower()
-        role = (locator.get_attribute("role") or "").lower()
-        cls  = (locator.get_attribute("class") or "").lower()
-
-        # 🔹 텍스트형 예외: btn-learn 류는 기본 Text 로 본다 (LG UK 패턴)
-        if "btn-learn" in cls and "c-button" not in cls and "c-btn" not in cls:
-            return ("Text", "Unknown")
-
-        # 시각적 버튼성 측정 (자기 + 부모 2단계까지 중 가장 '버튼스러운' 노드 기준)
-        metrics = locator.evaluate("""
-        (el)=>{
-          const px = v => parseFloat(v)||0;
-          const radius = cs => {
-            const vals = (cs.borderRadius||'0').toString().split(/[\\s\\/]+/).map(v=>parseFloat(v)||0);
-            return vals.reduce((a,b)=>a+b,0)/(vals.length||1);
-          };
-          const alphaOf = col => {
-            if(!col) return 0;
-            const m = col.match(/rgba?\\(([^)]+)\\)/);
-            if(!m) return 0;
-            const p = m[1].split(',').map(s=>parseFloat(s));
-            return (p.length===4 && isFinite(p[3])) ? p[3] : ((p[0]+p[1]+p[2])>0?1:0);
-          };
-          function collect(node){
-            const cs = getComputedStyle(node);
-            const padX = px(cs.paddingLeft)+px(cs.paddingRight);
-            const bW   = ["Top","Right","Bottom","Left"].map(s=>px(cs["border"+s+"Width"])).reduce((a,b)=>a+b,0)/4;
-            const avgR = radius(cs);
-            const alpha= alphaOf(cs.backgroundColor);
-            return {padX,bW,avgR,alpha,cls:(node.className||'').toString().toLowerCase(),
-                    tag:(node.tagName||'').toLowerCase()};
-          }
-          let best = collect(el), node = el;
-          for(let i=0;i<2;i++){
-            node = node.parentElement;
-            if(!node) break;
-            const m = collect(node);
-            // 더 버튼스러운 지표면 교체
-            const score = (m.padX>=10) + (m.bW>=1) + (m.avgR>=6) + (m.alpha>0.02) +
-                          (m.cls.includes('c-button')||m.cls.includes('c-btn')||m.tag==='button');
-            const scoreBest = (best.padX>=10) + (best.bW>=1) + (best.avgR>=6) + (best.alpha>0.02) +
-                              (best.cls.includes('c-button')||best.cls.includes('c-btn')||best.tag==='button');
-            if(score > scoreBest) best = m;
-          }
-          return best;
-        }
-        """)
-
-        looks_button = (
-            metrics["padX"] >= 10 or
-            metrics["bW"]   >= 1  or
-            metrics["avgR"] >= 6  or
-            metrics["alpha"]> 0.02 or
-            "c-button" in metrics["cls"] or "c-btn" in metrics["cls"] or metrics["tag"] == "button"
+        m = locator.evaluate(_METRICS_JS)
+        is_button_like = (
+            "btn" in m["cls"] or "button" in m["cls"] or "cta" in m["cls"] or
+            m["nodeTag"] == "button" or
+            (m["padX"] >= 10 and (m["alpha"] > 0.02 or m["borderW"] >= 1 or m["avgRadius"] >= 6))
         )
-
-        if not looks_button:
-            return ("Text", "Unknown")
-
-        shape = "Rounded" if metrics["avgR"] >= 10 else ("Squared" if metrics["avgR"] >= 1 else "Unknown")
-        return ("Button", shape if shape != "Unknown" else _rounded_from_class_or_css(page, locator))
+        shape = "Rounded" if m["avgRadius"] >= 10 else ("Squared" if m["avgRadius"] >= 1 else "Unknown")
+        typ = "Button+Icon" if (is_button_like and m.get("hasIcon")) else ("Button" if is_button_like else "Text")
+        return (typ, shape if typ.startswith("Button") else "Unknown")
     except Exception:
         return ("Text", "Unknown")
 
@@ -416,7 +308,6 @@ def _rounded_from_class_or_css(page, el):
             return "Rounded"
         js = r"""
         (node)=>{
-          if(!node) return {avg:0,h:0,maxR:0};
           const takeR = (cs)=>[
             parseFloat(cs.borderTopLeftRadius)||0,
             parseFloat(cs.borderTopRightRadius)||0,
@@ -431,252 +322,126 @@ def _rounded_from_class_or_css(page, el):
             try{
               const b = getComputedStyle(el,"::before");
               const a = getComputedStyle(el,"::after");
-              if(b){ maxR = Math.max(maxR, ...takeR(b)); }
-              if(a){ maxR = Math.max(maxR, ...takeR(a)); }
+              const tb = [parseFloat(b.borderTopLeftRadius)||0,parseFloat(b.borderTopRightRadius)||0,parseFloat(b.borderBottomRightRadius)||0,parseFloat(b.borderBottomLeftRadius)||0];
+              const ta = [parseFloat(a.borderTopLeftRadius)||0,parseFloat(a.borderTopRightRadius)||0,parseFloat(a.borderBottomRightRadius)||0,parseFloat(a.borderBottomLeftRadius)||0];
+              maxR = Math.max(maxR, ...tb, ...ta);
             }catch(e){}
             return maxR;
           };
-          let maxR = 0, targetH = 0;
-          const visit = (el, depth=0)=>{
-            if(!el || depth>2) return;
-            try{
-              const r = el.getBoundingClientRect();
-              const h = r.height||0;
-              const mr = maxRin(el);
-              if(mr > maxR){
-                maxR = mr; targetH = h;
-              }
-            }catch(e){}
-            const pref = el.querySelectorAll?.(".c-button__inner, .c-btn__inner, .inner, a, button, span, div") || [];
-            let i=0;
-            for(const c of pref){ if(i++>12) break; visit(c, depth+1); }
-          };
-          visit(node,0);
-          const cs0 = getComputedStyle(node);
-          const rs0 = [
-            parseFloat(cs0.borderTopLeftRadius)||0,
-            parseFloat(cs0.borderTopRightRadius)||0,
-            parseFloat(cs0.borderBottomRightRadius)||0,
-            parseFloat(cs0.borderBottomLeftRadius)||0
-          ];
-          const rect0 = node.getBoundingClientRect();
-          const avg = (rs0.reduce((a,b)=>a+b,0)/4)||0;
-          const h0  = rect0.height||0;
-          return {avg:avg, h:Math.max(h0,targetH), maxR:maxR};
+          const rect = node.getBoundingClientRect();
+          const cs = getComputedStyle(node);
+          const rs = takeR(cs);
+          const avg = (rs.reduce((a,b)=>a+b,0)/4)||0;
+          const maxR = Math.max(avg, maxRin(node));
+          const h = Math.max(1, rect.height||0);
+          return {R:maxR, H:h};
         }
         """
         m = el.evaluate(js)
         if not m: return "Unknown"
-        R = max(float(m.get("avg") or 0), float(m.get("maxR") or 0))
-        H = float(m.get("h") or 0)
-        ratio = (R/H) if H>0 else 0.0
-        if R >= 12 or ratio >= 0.25:
-            return "Rounded"
-        if R >= 1:
-            return "Squared"
+        R, H = float(m.get("R",0)), float(m.get("H",0))
+        if R >= 12 or (H>0 and (R/H)>=0.25): return "Rounded"
+        if R >= 1: return "Squared"
         return "Unknown"
     except Exception:
         return "Unknown"
 
-# ========================= Compare 위치 계산 =========================
-_COMPARE_POS_JS = r"""
-(el, cardHint)=>{
-  if(!el) return {horiz:"Unknown", vert:"Unknown"};
-  const lift=(node)=>{
-    if(!node) return null;
-    if(node.tagName && node.tagName.toLowerCase()==='input'){
-      const id=node.getAttribute('id');
-      if(id){
-        const lab=document.querySelector(`label[for="${id}"]`);
-        if(lab) return lab;
-      }
-      return node.parentElement || node;
-    }
-    const host=node.closest && node.closest("a,button,label,[role='button'],[role='checkbox']");
-    return host || node;
-  };
-  el = lift(el);
-
-  const CARD_SEL = [
-    "li.product-grid__item", "article.product", ".product-card", ".product-list__item",
-    "[data-product-id]", "[data-model]", "[data-sku]", "[data-modelcode]"
-  ].join(", ");
-  const isCardLike=(n)=>{
-    if(!n) return false;
-    if(n.matches && n.matches(CARD_SEL)) return true;
-    const cls=(n.className||"").toString().toLowerCase();
-    return /(product|card|grid|tile|list)/.test(cls);
-  };
-  let bestCard = null, bestArea = Infinity;
-  let cur = el;
-  for (let hop=0; cur && hop<10; hop++, cur=cur.parentElement){
-    if(!(cur instanceof Element)) break;
-    if(!isCardLike(cur)) continue;
-    const r = cur.getBoundingClientRect();
-    const area = Math.max(1, r.width) * Math.max(1, r.height);
-    if (r.width < 160 || r.height < 80) continue;
-    if (area < bestArea){ bestArea = area; bestCard = cur; }
-  }
-  let card = bestCard || cardHint || el.parentElement || document.body;
-
-  const cr = card.getBoundingClientRect();
-  const cs = getComputedStyle(card);
-  const pl = parseFloat(cs.paddingLeft)||0, pr=parseFloat(cs.paddingRight)||0;
-  const pt = parseFloat(cs.paddingTop)||0,  pb=parseFloat(cs.paddingBottom)||0;
-  const w  = Math.max(1, cr.width  - (pl+pr));
-  const h  = Math.max(1, cr.height - (pt+pb));
-  const x0 = cr.left + pl, y0 = cr.top + pt;
-
-  const er = el.getBoundingClientRect();
-  const xC = ((er.left + er.right)/2) - x0;
-  const yC = ((er.top  + er.bottom)/2) - y0;
-  const isTiny = (er.width <= 96 && er.height <= 48);
-
-  const textish = (el.innerText||el.textContent||"").toLowerCase();
-  const aria = (el.getAttribute("aria-label")||"").toLowerCase();
-  const cls  = (el.className||"").toString().toLowerCase();
-  const looksCompare = /compare|비교|vergleich|comparer|comparar|confronta/.test(textish+aria+cls);
-  const node = (el.tagName && el.tagName.toLowerCase()==='input') ? el : el.querySelector && el.querySelector("input[type='checkbox']");
-  const isCheckbox = !!node;
-
-  const dist = (a,b)=>Math.abs(a-b);
-  let cand = [
-    {pos:"Left",   d: dist(xC, 0)},
-    {pos:"Center", d: dist(xC, w/2)},
-    {pos:"Right",  d: dist(xC, w)}
-  ];
-  cand.sort((a,b)=>a.d-b.d);
-  let horiz = cand[0].pos;
-
-  if ((looksCompare || isCheckbox) && xC <= w*0.55) {
-    horiz = "Left";
-  } else if (isTiny && xC <= w*0.58) {
-    horiz = "Left";
-  } else {
-    if (looksCompare && cand[0].pos==="Center" && xC <= w*0.6){
-      horiz = "Left";
-    }
-  }
-  const vert = (yC < h*0.33) ? "Top" : (yC > h*0.67 ? "Bottom" : "Middle");
-  return {horiz, vert};
-}
-"""
+# ========================= Compare 위치 계산 (보강판) =========================
 def _compare_position(page, cmp_loc, card_loc=None):
+    """카드 박스를 기준으로 좌/우/상/하 위치를 안정적으로 판정"""
     try:
         if not cmp_loc or cmp_loc.count() == 0:
-            return UNKNOWN
+            return "Unknown"
 
-        # 카드 힌트 없으면 가장 가까운 카드성 조상 자동 추정
+        # 카드 힌트가 없으면 product-card 계열 상위 박스를 자동 추정
         if not card_loc or card_loc.count() == 0:
             card_loc = cmp_loc.locator(
-                "xpath=ancestor::li[contains(@class,'product') or contains(@class,'card')][1] | "
-                "xpath=ancestor::article[contains(@class,'product')][1] | "
-                "xpath=ancestor::*[contains(@class,'product-card') or contains(@class,'product') or contains(@class,'grid')][1]"
+                "xpath=ancestor::*[contains(@class,'product-card') or contains(@class,'product') or contains(@class,'grid__item') or contains(@class,'product-list__item')][1]"
             )
+
         card_el = card_loc.element_handle() if (card_loc and card_loc.count() > 0) else None
 
         pos = page.evaluate("""
         (el, card)=>{
-          const cr = (card ? card.getBoundingClientRect()
-                           : (el.parentElement?.getBoundingClientRect() || document.body.getBoundingClientRect()));
-          const er = el.getBoundingClientRect();
-          const w=Math.max(1, cr.width), h=Math.max(1, cr.height);
-          const xC=(er.left+er.right)/2 - cr.left;
-          const yC=(er.top +er.bottom)/2 - cr.top;
-          return {w,h,xC,yC};
+          const box = (card ? card.getBoundingClientRect()
+                            : el.parentElement?.getBoundingClientRect() || document.body.getBoundingClientRect());
+          const e = el.getBoundingClientRect();
+          const w = Math.max(1, box.width);
+          const h = Math.max(1, box.height);
+          const cx = (e.left + e.right)/2 - box.left;
+          const cy = (e.top  + e.bottom)/2 - box.top;
+          return {w, h, cx, cy};
         }
         """, cmp_loc.element_handle(), card_el)
 
-        # 임계치: 중앙을 넉넉히(0.45~0.55) 잡아 좌/우 오판 줄임
-        left_edge  = pos["w"] * 0.45
-        right_edge = pos["w"] * 0.55
+        left_edge   = pos["w"] * 0.40
+        right_edge  = pos["w"] * 0.60
+        top_edge    = pos["h"] * 0.33
+        bottom_edge = pos["h"] * 0.67
 
-        horiz = "Left" if pos["xC"] <= left_edge else ("Right" if pos["xC"] >= right_edge else "Center")
-        vert  = "Top"  if pos["yC"] <= pos["h"]*0.33 else ("Bottom" if pos["yC"] >= pos["h"]*0.67 else "Middle")
+        horiz = "Left" if pos["cx"] <= left_edge else ("Right" if pos["cx"] >= right_edge else "Center")
+        vert  = "Top"  if pos["cy"] <= top_edge  else ("Bottom" if pos["cy"] >= bottom_edge else "Middle")
 
         return f"{vert}-{horiz}"
     except Exception:
-        return UNKNOWN
+        return "Unknown"
 
 # ========================= Compare Locator (강화) =========================
 def _find_compare_locator(page, card_locator=None):
-    def _from_container(scope):
-        # 가장 강한 패턴: .btn-item.compare 컨테이너
-        cand = scope.locator(
-            ".btn-item.compare, "                       # LG 공통
-            "[class*='btn-item'][class*='compare' i], "
-            "div[class*='compare' i]"
-        ).filter(has_text=None).first
-        if cand and cand.count() > 0:
-            # 1) label[for] (시각적 클릭 타겟)
-            lbl = cand.locator("label[for]").first
-            if lbl and lbl.count() > 0:
-                return lbl
-            # 2) input[type=checkbox] → label 승격
-            cb = cand.locator("input[type='checkbox']").first
-            if cb and cb.count() > 0:
-                _id = cb.get_attribute("id") or ""
-                if _id:
-                    lab = page.locator(f"label[for='{_id}']").first
-                    if lab and lab.count() > 0:
-                        return lab
-                return cb
-            # 3) 버튼/링크류 보조
-            btn = cand.locator("a, button, [role='button'], label").first
-            if btn and btn.count() > 0:
-                return btn
-        return None
-
-    # (A) 카드 범위 우선
-    scope = card_locator if (card_locator and card_locator.count() > 0) else None
-    if scope:
-        hit = _from_container(scope)
-        if hit: return hit
-
-    # (B) 페이지 전역 컨테이너 보강 (카드 밖 푸터/플로팅 등)
-    hit = _from_container(page)
-    if hit: return hit
-
-    # (C) 일반 checkbox → label 승격 (카드 범위)
     scope = card_locator if (card_locator and card_locator.count() > 0) else page
+
+    # 1) checkbox → label[for] 승격
     try:
-        cb = scope.locator("input[type='checkbox'][id*='compare' i], input[type='checkbox'][name*='compare' i]")
+        cb = scope.locator("input[type='checkbox'][name*='compare' i], input[type='checkbox'][id*='compare' i]")
         if cb.count() == 0:
             cb = scope.locator("input[type='checkbox']")
         if cb.count() > 0:
             el = cb.first
-            _id = el.get_attribute("id") or ""
-            if _id:
-                lbl = page.locator(f"label[for='{_id}']").first
-                if lbl and lbl.count() > 0:
-                    return lbl
+            try:
+                _id = el.get_attribute("id") or ""
+                if _id:
+                    lbl = page.locator(f"label[for='{_id}']")
+                    if lbl.count() > 0:
+                        return lbl.first
+            except Exception:
+                pass
             return el
     except Exception:
         pass
 
-    # (D) role/data-testid 등 보조
+    # 2) data-속성 / role
     try:
-        aux = scope.locator(
+        cand = scope.locator(
             "[data-compare], [data-testid*='compare' i], [data-test*='compare' i], "
             "[role='switch'][aria-label*='compare' i], [role='checkbox'][aria-label*='compare' i]"
         )
-        if aux.count() > 0:
-            return aux.first
+        if cand.count() > 0:
+            return cand.first
     except Exception:
         pass
 
-    # (E) 텍스트/aria/class 검색 (마지막)
+    # 3) 텍스트/aria/class
     try:
         cand = scope.locator("a, button, label, [role='button']")
         n = cand.count()
-        for i in range(min(n, 80)):
+        for i in range(min(n, 60)):
             el = cand.nth(i)
-            txt  = (el.inner_text() or "")
+            try:
+                txt = (el.inner_text() or "").strip()
+            except Exception:
+                txt = ""
             aria = (el.get_attribute("aria-label") or "")
             cls  = (el.get_attribute("class") or "")
-            s = f"{txt} {aria} {cls}".lower()
-            if "compare" in s or "비교" in s:
+            if _contains_compare_text(txt) or _contains_compare_text(aria) or _contains_compare_text(cls):
                 return el
+    except Exception:
+        pass
+
+    # 4) 마지막: 카드 내 임의 checkbox/토글
+    try:
+        cand = scope.locator("input[type='checkbox'], [role='switch'], [role='checkbox']")
+        if cand.count() > 0:
+            return cand.first
     except Exception:
         pass
 
@@ -687,9 +452,9 @@ def classify_template_sample(url: str):
     VIEWPORT={"width":1280,"height":900}; NAV_TMO, IDLE_TMO = 35000, 9000
     result={"LearnMore_Type":"Text","LearnMore_Shape":UNKNOWN,"BuyNow_Shape":"Squared","Compare_Pos":"Center"}
     with sync_playwright() as p:
-        browser = p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
-        ctx = browser.new_context(viewport=VIEWPORT, ignore_https_errors=True)
-        page = ctx.new_page()
+        browser=p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
+        ctx=p.new_context(viewport=VIEWPORT, ignore_https_errors=True)
+        page=ctx.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=NAV_TMO)
             try: page.wait_for_load_state("networkidle", timeout=IDLE_TMO)
@@ -734,7 +499,7 @@ def fetch_models(url: str, max_models=50):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
-        ctx = browser.new_context(
+        ctx = p.new_context(
             viewport=vp,
             extra_http_headers={"Accept-Language": accept_lang},
             locale=accept_lang.split(",")[0],
@@ -804,6 +569,7 @@ def fetch_models(url: str, max_models=50):
         else:
             if last_err: raise last_err
 
+        # 쿠키 배너 닫기
         for sel in ["button[id*='accept']","button[aria-label*='Accept']",".onetrust-accept-btn-handler",
                     "button:has-text('Accept all')","button:has-text('Accept All')",
                     "button:has-text('Alle akzeptieren')","button:has-text('Aceptar todo')","button:has-text('Aceptar todas')"]:
@@ -816,6 +582,7 @@ def fetch_models(url: str, max_models=50):
                 page.get_by_text(btn_text, exact=False).first.click(timeout=1200)
         except Exception: pass
 
+        # 스크롤
         try:
             for _ in range(3 if fast_mode else 6):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); page.wait_for_timeout(600)
@@ -863,7 +630,7 @@ def fetch_models(url: str, max_models=50):
                     if m: dom_models.append({"Model":m.group(0).upper()}); break
         except Exception: pass
 
-        # CTA 추정 (강화) — Learn/Buy/Compare
+        # CTA 추정 — Learn/Buy/Compare
         cta_types={
             "LearnMore_Type": UNSET,
             "LearnMore_Shape": UNSET,
@@ -898,27 +665,25 @@ def fetch_models(url: str, max_models=50):
                     if cta_types["LearnMore_Shape"] is UNSET or cta_types["LearnMore_Shape"] == UNKNOWN:
                         cta_types["LearnMore_Shape"] = lm_shape if lm_shape!=UNKNOWN else _rounded_from_class_or_css(page, learn)
 
-                # Compare (강화된 탐색)
+                # Compare (강화 탐색) — 카드 범위 우선, 실패 시 전역
                 cmpb = _find_compare_locator(page, card)
+                if not cmpb:
+                    cmpb = _find_compare_locator(page, None)
                 if cmpb:
                     cta_types["Compare_Pos"] = _compare_position(page, cmpb, card)
-                if not cmpb:
-                    cmpb = _find_compare_locator(page, None)    
 
-                # 디버그 출력
                 if debug_log:
-                    try:
-                        st.write({"compare_found": bool(cmpb)})
-                        if cmpb:
+                    st.write({"compare_found": bool(cmpb)})
+                    if cmpb:
+                        try:
                             st.write({
                                 "cmp_tag": cmpb.evaluate("(n)=>n.tagName"),
                                 "cmp_cls": cmpb.get_attribute("class"),
                                 "cmp_aria": cmpb.get_attribute("aria-label"),
                                 "cmp_text": (cmpb.inner_text() or "")[:120]
                             })
-                    except Exception:
-                        pass
-
+                        except Exception:
+                            pass
         except Exception: pass
 
         if take_screens:
@@ -947,7 +712,7 @@ def fetch_models(url: str, max_models=50):
         except Exception: pass
 
     # 합치기/필터
-    bundle=[]
+    bundle=[]; 
     if results: bundle.extend(results)
     if dom_models: bundle.extend(dom_models)
     seen=set(); out=[]
@@ -1047,34 +812,19 @@ def match_rows(a_models, b_models, a_types, b_types, want=2):
 
 # ========================= 실행 =========================
 if run_btn:
-    # URL 검증/로딩
-    if st.session_state.url_pairs:
-        url_as = st.session_state.url_pairs[0]["as"]
-        url_tb = st.session_state.url_pairs[0]["to"]
-    # 폼에서 바로 실행 눌렀지만 페어가 없다면 폼값으로 시도
-    if (not st.session_state.url_pairs) and _valid_url(url_as) and _valid_url(url_tb):
-        st.session_state.url_pairs = [{"as": url_as.strip(), "to": url_tb.strip()}]
-        try:
-            st.experimental_set_query_params(**{"as": url_as.strip(), "to": url_tb.strip()})
-        except Exception:
-            pass
+    st.info("네트워크 응답 기반으로 PLP 데이터를 수집 중입니다...")
+    try:
+        st.markdown(f"[{url_as}]({url_as}) ↔ [{url_tb}]({url_tb})")
+        a_models, a_types = fetch_models(url_as, max_models=80)
+        b_models, b_types = fetch_models(url_tb, max_models=80)
+        st.caption(f"[AS-IS] 수집 {len(a_models)}건 / [TO-BE] 수집 {len(b_models)}건")
+        rows = match_rows(a_models, b_models, a_types, b_types, want=2)
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True)
+        st.success(f"✅ {len(df)}개 비교행 출력 (UK ↔ SG)")
 
-    if not st.session_state.url_pairs:
-        st.error("실행하려면 유효한 두 개의 URL을 먼저 입력해주세요.")
-    else:
-        url_as = st.session_state.url_pairs[0]["as"]
-        url_tb = st.session_state.url_pairs[0]["to"]
-
-        st.info("네트워크 응답 기반으로 PLP 데이터를 수집 중입니다...")
-        try:
-            a_models, a_types = fetch_models(url_as, max_models=80)
-            b_models, b_types = fetch_models(url_tb, max_models=80)
-            st.caption(f"[AS-IS] 수집 {len(a_models)}건 / [TO-BE] 수집 {len(b_models)}건")
-            rows = match_rows(a_models, b_models, a_types, b_types, want=2)
-            df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True)
-            st.success(f"✅ {len(df)}개 비교행 출력 (UK ↔ SG)")
-            if debug_log:
-                st.write("a_types:", a_types, " / b_types:", b_types)
-        except Exception as e:
-            st.error(f"실행 중 오류: {type(e).__name__}: {e}")
+        if debug_log:
+            st.write("a_types:", a_types)
+            st.write("/ b_types:", b_types)
+    except Exception as e:
+        st.error(f"실행 중 오류: {type(e).__name__}: {e}")
