@@ -453,7 +453,7 @@ def classify_template_sample(url: str):
     result={"LearnMore_Type":"Text","LearnMore_Shape":UNKNOWN,"BuyNow_Shape":"Squared","Compare_Pos":"Center"}
     with sync_playwright() as p:
         browser=p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
-        ctx=p.new_context(viewport=VIEWPORT, ignore_https_errors=True)
+        ctx=browser.new_context(viewport=VIEWPORT, ignore_https_errors=True)
         page=ctx.new_page()
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=NAV_TMO)
@@ -499,7 +499,7 @@ def fetch_models(url: str, max_models=50):
 
     with sync_playwright() as p:
         browser = p.chromium.launch(**PLAYWRIGHT_LAUNCH_KW)
-        ctx = p.new_context(
+        ctx = browser.new_context(
             viewport=vp,
             extra_http_headers={"Accept-Language": accept_lang},
             locale=accept_lang.split(",")[0],
